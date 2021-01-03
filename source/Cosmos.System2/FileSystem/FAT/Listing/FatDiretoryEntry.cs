@@ -1,13 +1,11 @@
 ﻿//#define COSMOSDEBUG
 
 using System;
-using System.IO;
 using System.Collections.Generic;
-
-using Cosmos.Common.Extensions;
-using Cosmos.HAL;
-using Cosmos.System.FileSystem.Listing;
+using System.IO;
 using System.Text;
+using Cosmos.Common.Extensions;
+using Cosmos.System.FileSystem.Listing;
 
 namespace Cosmos.System.FileSystem.FAT.Listing
 {
@@ -20,8 +18,6 @@ namespace Cosmos.System.FileSystem.FAT.Listing
 
         private readonly uint mFirstClusterNum;
 
-        // Size is UInt32 because FAT doesn't support bigger.
-        // Don't change to UInt64
         /// <summary>
         /// Initializes a new instance of the <see cref="FatDirectoryEntry"/> class.
         /// </summary>
@@ -36,25 +32,22 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         /// <exception cref="ArgumentOutOfRangeException">Thrown when first cluster smaller then file system root cluster.</exception>
         /// <exception cref="ArgumentNullException">Thrown when aFileSystem is null.</exception>
         /// <exception cref="ArgumentException">Thrown when aFullPath or aName is null or empty.</exception>
-        public FatDirectoryEntry(
-            FatFileSystem aFileSystem,
-            FatDirectoryEntry aParent,
-            string aFullPath,
-            string aName,
-            long aSize,
-            uint aFirstCluster,
-            uint aEntryHeaderDataOffset,
-            DirectoryEntryTypeEnum aEntryType)
-            : base(aFileSystem, aParent, aFullPath, aName, aSize, aEntryType)
+        public FatDirectoryEntry(FatFileSystem aFileSystem, FatDirectoryEntry aParent, string aFullPath, string aName, long aSize,
+            uint aFirstCluster, uint aEntryHeaderDataOffset, DirectoryEntryTypeEnum aEntryType, bool @new = false) : base(aFileSystem, aParent, aFullPath, aName, aSize, aEntryType)
         {
             if (aFirstCluster < aFileSystem.RootCluster)
             {
                 Global.mFileSystemDebugger.SendInternal($"aFirstCluster {aFirstCluster} < aFileSystem.RootCluster {aFileSystem.RootCluster}");
                 throw new ArgumentOutOfRangeException(nameof(aFirstCluster));
             }
-
+            Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.ctor --");
             mFirstClusterNum = aFirstCluster;
+            Global.mFileSystemDebugger.SendInternal("mFirstClusterNum: " + mFirstClusterNum);
             mEntryHeaderDataOffset = aEntryHeaderDataOffset;
+            if(@new && aEntryType == DirectoryEntryTypeEnum.Directory && mEntryHeaderDataOffset == 0)
+            {
+                InitialiseNewDirectory(aFileSystem);
+            }
         }
 
         /// <summary>
@@ -69,22 +62,32 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         /// <exception cref="ArgumentOutOfRangeException">Thrown when first cluster smaller then file system root cluster.</exception>
         /// <exception cref="ArgumentNullException">Thrown when aFileSystem is null.</exception>
         /// <exception cref="ArgumentException">Thrown when aFullPath or aName is null or empty.</exception>
-        public FatDirectoryEntry(
-            FatFileSystem aFileSystem,
-            FatDirectoryEntry aParent,
-            string aFullPath,
-            long aSize,
-            string aName,
-            uint aFirstCluster)
+        public FatDirectoryEntry(FatFileSystem aFileSystem, FatDirectoryEntry aParent, string aFullPath, string aName, long aSize, uint aFirstCluster, bool @new = false)
             : base(aFileSystem, aParent, aFullPath, aName, aSize, DirectoryEntryTypeEnum.Directory)
         {
             if (aFirstCluster < aFileSystem.RootCluster)
             {
                 throw new ArgumentOutOfRangeException(nameof(aFirstCluster));
             }
+            Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.ctor --");
 
             mFirstClusterNum = aFirstCluster;
+            Global.mFileSystemDebugger.SendInternal("mFirstClusterNum: " + mFirstClusterNum);
             mEntryHeaderDataOffset = 0;
+            if (@new)
+            {
+                InitialiseNewDirectory(aFileSystem);
+            }
+        }
+
+        private void InitialiseNewDirectory(FatFileSystem aFileSystem)
+        {
+            //Now add the . and .. directory entries
+            var dot = new FatDirectoryEntry(aFileSystem, this, mFullPath + "\\.", ".", 0, mFirstClusterNum);
+            dot.AllocateDirectoryEntry(".          ", true);
+
+            var dotdot = new FatDirectoryEntry(aFileSystem, this, mFullPath + "\\..", "..", 0, ((FatDirectoryEntry)mParent).mFirstClusterNum, 32, DirectoryEntryTypeEnum.Directory);
+            dotdot.AllocateDirectoryEntry("..         ", true);
         }
 
         /// <summary>
@@ -272,11 +275,14 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         /// </list>
         /// </exception>
         /// <exception cref="NotSupportedException">Thrown when FAT type is unknown.</exception>
-        private void AllocateDirectoryEntry(string aShortName)
+        private void AllocateDirectoryEntry(string aShortName, bool special)
         {
             Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.AllocateDirectoryEntry --");
-
-            string xNameString = GetShortName(aShortName);
+            string xNameString = aShortName;
+            if (!special)
+            {
+                xNameString = GetShortName(aShortName);
+            }
 
             SetDirectoryEntryMetadataValue(FatDirectoryEntryMetadata.ShortName, xNameString);
 
@@ -459,9 +465,11 @@ namespace Cosmos.System.FileSystem.FAT.Listing
                 Global.mFileSystemDebugger.SendInternal("xFirstCluster = " + xFirstCluster);
                 Global.mFileSystemDebugger.SendInternal("xEntryHeaderDataOffset = " + xEntryHeaderDataOffset);
 
-                var xNewEntry = new FatDirectoryEntry((FatFileSystem)mFileSystem, this, xFullPath, aName, 0, xFirstCluster, xEntryHeaderDataOffset, aEntryType);
+                ((FatFileSystem)mFileSystem).Write(xFirstCluster, new byte[((FatFileSystem)mFileSystem).BytesPerCluster]);
 
-                xNewEntry.AllocateDirectoryEntry(xShortName);
+                var xNewEntry = new FatDirectoryEntry((FatFileSystem)mFileSystem, this, xFullPath, aName, 0, xFirstCluster, xEntryHeaderDataOffset, aEntryType, true);
+
+                xNewEntry.AllocateDirectoryEntry(xShortName, false);
 
                 return xNewEntry;
             }
@@ -512,6 +520,8 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         /// <exception cref="NotSupportedException">Thrown when FAT type is unknown.</exception>
         public void DeleteDirectoryEntry()
         {
+            Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.DeleteDirectoryEntry --");
+
             if (mEntryType == DirectoryEntryTypeEnum.Unknown)
             {
                 throw new NotImplementedException();
@@ -524,12 +534,17 @@ namespace Cosmos.System.FileSystem.FAT.Listing
 
             var xData = ((FatDirectoryEntry)mParent).GetDirectoryEntryData();
 
-            var xEntryOffset = mEntryHeaderDataOffset - 32;
-
-            while (xData[xEntryOffset + 11] == FatDirectoryEntryAttributeConsts.LongName)
+            if (mEntryHeaderDataOffset > 32)
             {
-                xData[xEntryOffset] = FatDirectoryEntryAttributeConsts.UnusedOrDeletedEntry;
-                xEntryOffset -= 32;
+                var xEntryOffset = mEntryHeaderDataOffset - 32;
+
+                Global.mFileSystemDebugger.SendInternal("xEntryOffset: " + xEntryOffset);
+
+                while (xData[xEntryOffset + 11] == FatDirectoryEntryAttributeConsts.LongName)
+                {
+                    xData[xEntryOffset] = FatDirectoryEntryAttributeConsts.UnusedOrDeletedEntry;
+                    xEntryOffset -= 32;
+                }
             }
 
             ((FatDirectoryEntry)mParent).SetDirectoryEntryData(xData);
@@ -888,6 +903,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         private byte[] GetDirectoryEntryData()
         {
             Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.GetDirectoryEntryData --");
+            Global.mFileSystemDebugger.SendInternal("mFirstClusterNum:" + mFirstClusterNum);
 
             if (mEntryType != DirectoryEntryTypeEnum.Unknown)
             {
@@ -988,6 +1004,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         internal void SetDirectoryEntryMetadataValue(FatDirectoryEntryMetadata aEntryMetadata, byte aValue)
         {
             Global.mFileSystemDebugger.SendInternal(" -- FatDirectoryEntry.SetDirectoryEntryMetadataValue(uint) --");
+            Global.mFileSystemDebugger.SendInternal("aEntryMetadata = " + aEntryMetadata.DataOffset);
             Global.mFileSystemDebugger.SendInternal("aValue = " + aValue);
 
             if (IsRootDirectory())
@@ -1043,6 +1060,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         internal void SetDirectoryEntryMetadataValue(FatDirectoryEntryMetadata aEntryMetadata, ushort aValue)
         {
             Global.mFileSystemDebugger.SendInternal(" -- FatDirectoryEntry.SetDirectoryEntryMetadataValue(uint) --");
+            Global.mFileSystemDebugger.SendInternal("aEntryMetadata = " + aEntryMetadata.DataOffset);
             Global.mFileSystemDebugger.SendInternal("aValue = " + aValue);
 
             if (IsRootDirectory())
@@ -1054,6 +1072,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
 
             if (xData.Length > 0)
             {
+                Global.mFileSystemDebugger.SendInternal("mEntryHeaderDataOffset = " + mEntryHeaderDataOffset);
                 var xValue = new byte[aEntryMetadata.DataLength];
                 xValue.SetUInt16(0, aValue);
                 uint offset = mEntryHeaderDataOffset + aEntryMetadata.DataOffset;
@@ -1100,6 +1119,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         internal void SetDirectoryEntryMetadataValue(FatDirectoryEntryMetadata aEntryMetadata, uint aValue)
         {
             Global.mFileSystemDebugger.SendInternal(" -- FatDirectoryEntry.SetDirectoryEntryMetadataValue(uint) --");
+            Global.mFileSystemDebugger.SendInternal("aEntryMetadata = " + aEntryMetadata.DataOffset);
             Global.mFileSystemDebugger.SendInternal("aValue = " + aValue);
 
             if (IsRootDirectory())
@@ -1157,6 +1177,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         internal void SetDirectoryEntryMetadataValue(FatDirectoryEntryMetadata aEntryMetadata, long aValue)
         {
             Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.SetDirectoryEntryMetadataValue(long) --");
+            Global.mFileSystemDebugger.SendInternal("aEntryMetadata = " + aEntryMetadata.DataOffset);
             Global.mFileSystemDebugger.SendInternal("aValue =");
             Global.mFileSystemDebugger.SendInternal(aValue);
 
@@ -1218,6 +1239,7 @@ namespace Cosmos.System.FileSystem.FAT.Listing
         internal void SetDirectoryEntryMetadataValue(FatDirectoryEntryMetadata aEntryMetadata, string aValue)
         {
             Global.mFileSystemDebugger.SendInternal("-- FatDirectoryEntry.SetDirectoryEntryMetadataValue(string) --");
+            Global.mFileSystemDebugger.SendInternal("aEntryMetadata = " + aEntryMetadata.DataOffset);
             Global.mFileSystemDebugger.SendInternal($"aValue = {aValue}");
 
             if (IsRootDirectory())
@@ -1282,10 +1304,10 @@ namespace Cosmos.System.FileSystem.FAT.Listing
 
             if (xData.Length > 0)
             {
-                var xValue = new byte[aEntryMetadata.DataLength];
+                var xValue = new byte[aEntryMetadata.DataLength * 4];
                 xValue.SetUInt32(0, aValue);
                 uint offset = aEntryHeaderDataOffset + aEntryMetadata.DataOffset;
-                Array.Copy(xValue, 0, xData, (int)offset, (int)aEntryMetadata.DataLength);
+                Array.Copy(xValue, 0, xData, (int)offset, (int)aEntryMetadata.DataLength * 4);
                 SetDirectoryEntryData(xData);
             }
         }
@@ -1327,11 +1349,12 @@ namespace Cosmos.System.FileSystem.FAT.Listing
 
             if (xData.Length > 0)
             {
-                var xValue = new byte[aEntryMetadata.DataLength];
+                Global.mFileSystemDebugger.SendInternal("length = " + aEntryMetadata.DataLength);
+                var xValue = new byte[aEntryMetadata.DataLength * 4];
                 xValue.SetUInt32(0, (uint)aValue);
                 uint offset = aEntryHeaderDataOffset + aEntryMetadata.DataOffset;
                 Global.mFileSystemDebugger.SendInternal("offset = " + offset);
-                Array.Copy(xValue, 0, xData, (int)offset, (int)aEntryMetadata.DataLength);
+                Array.Copy(xValue, 0, xData, (int)offset, (int)aEntryMetadata.DataLength * 4);
                 SetDirectoryEntryData(xData);
             }
         }
